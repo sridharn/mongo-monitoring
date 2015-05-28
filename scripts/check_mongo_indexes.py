@@ -31,7 +31,7 @@ def main(mongo_uri, output_file, simulate, output_json):
                 read_preference=ReadPreference.SECONDARY_PREFERRED)
             log.debug('Obtained connection to {0}'.format(cleaned))
             if conn.is_mongos:
-                process_mongods(results, conn, cleaned, reference)
+                process_mongos(results, conn, cleaned, reference)
             else:
                 replica_set_members = get_replica_set_members(cleaned)
                 process_replica_set_members(
@@ -40,6 +40,7 @@ def main(mongo_uri, output_file, simulate, output_json):
         else:
             results = RESULTS
             reference = REFERENCE
+        log.info('Done processing. Creating output.')
         if output_json:
             out_raw_file_name = output_file+'.raw'
             with open(out_raw_file_name, 'w') as out_raw_file:
@@ -47,7 +48,7 @@ def main(mongo_uri, output_file, simulate, output_json):
         write_html_output(out_html_file, cleaned, results, reference)
 
 
-def process_mongods(results, conn, mongos_uri, reference):
+def process_mongos(results, conn, mongos_uri, reference):
     log.info('In processing mongods for mongos {0}'.format(mongos_uri))
     shards = conn['config']['shards'].find({}, {'_id': 0, 'host': 1})
     for replica_set in shards:
@@ -99,8 +100,8 @@ def process_indexes(results, conn, server_uri, reference):
             if index['name'] not in ns_stats['indexes']:
                 ns_stats['indexes'][index['name']] = index['key']
                 ns_stats['index_count'] += 1
-
-        collection_indexes.append({ns: index_dict})
+        if len(index_dict) > 0:
+            collection_indexes.append({ns: index_dict})
     results['servers'][server_uri] = collection_indexes
 
 
