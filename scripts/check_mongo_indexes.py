@@ -5,8 +5,7 @@ import logging
 import simplejson as json
 # import sys
 
-from pymongo import MongoClient
-from pymongo import ReadPreference
+from pymongo import MongoClient, ReadPreference
 
 from sample_index_results import REFERENCE, RESULTS
 
@@ -23,7 +22,7 @@ def main(mongo_uri, output_file, simulate, output_json):
         if not simulate:
             results = {
                 'servers': {},
-                'errors': []
+                'errors': {}
             }
             reference = {}
             log.info('Processing URI {0}'.format(cleaned))
@@ -31,8 +30,7 @@ def main(mongo_uri, output_file, simulate, output_json):
                 cleaned,
                 read_preference=ReadPreference.SECONDARY_PREFERRED)
             log.debug('Obtained connection to {0}'.format(cleaned))
-            server_status = conn['admin'].command('serverStatus')
-            if 'mongos' in server_status['process']:
+            if conn.is_mongos:
                 process_mongods(results, conn, cleaned, reference)
             else:
                 replica_set_members = get_replica_set_members(cleaned)
@@ -47,7 +45,6 @@ def main(mongo_uri, output_file, simulate, output_json):
             with open(out_raw_file_name, 'w') as out_raw_file:
                 write_raw_output(out_raw_file, results, reference)
         write_html_output(out_html_file, cleaned, results, reference)
-
 
 
 def process_mongods(results, conn, mongos_uri, reference):
@@ -68,9 +65,7 @@ def process_mongods(results, conn, mongos_uri, reference):
         if success:
             process_replica_set_members(replica_set_members, results, reference)
         else:
-            results['errors'].append({
-                'server': mongos_uri,
-                'error': 'Cannot get replica set info'})
+            results['errors'][mongos_uri] = 'Cannot get replica set info'
 
 
 def process_indexes(results, conn, server_uri, reference):
@@ -125,16 +120,19 @@ def process_replica_set_members(members, results, reference):
     for member in members:
         try:
             member_conn = MongoClient(
-                member, 
-                # connectTimeoutMS=5000, 
+                member,
+                # connectTimeoutMS=5000,
                 read_preference=ReadPreference.SECONDARY_PREFERRED)
+            is_master = member_conn['admin'].command('isMaster')
+            if not (is_master['ismaster'] or is_master['secondary']):
+                log.warning('{0} is neither primary or secondary', member)
+                results['errors'][member] = 'Neither primary nor secondary'
+                return
             log.debug('Obtained connection to mongod {0}'.format(member))
             process_indexes(results, member_conn, member, reference)
         except Exception, e:
             log.exception(e)
-            results['errors'].append({
-                'server': member,
-                'error': 'Cannot connect'})
+            results['errors'][member] = 'Cannot connect'
 
 
 def write_raw_output(out_file, results, reference):
@@ -174,31 +172,37 @@ def write_output_body(out_file, header, results, reference):
 
 def write_errors(out_file, errors):
     out_file.write('\t\t<h2>Other errors</h2>\n')
-    if len(errors) > 1:
-        out_file.write('\t\t<table border="1">\n')
-        for server in errors:
+    if len(errors) > 0:
+        out_file.write('\t\t<table border="1" class="error">\n')
+        out_file.write(
+            '\t\t\t<tr><th>Server</th><th>Error</th></tr>\n')
+        for server in sorted(errors.iterkeys()):
             out_file.write(
-                '\t\t\t<tr class="error"><td>{0}</td></tr>\n'.format(
-                server))
+                '\t\t\t<tr><td>{0}</td><td>{0}</td></tr>\n'.format(
+                server,
+                errors[server]))
         out_file.write('\t\t</table>\n')
     else:
-        out_file.write('\t\t<p>No connection errors on this run.</p>')
+        out_file.write('\t\t<p>No other errors on this run.</p>')
 
 
 def write_indexes(out_file, reference):
     out_file.write('\t\t<h2>Indexes</h2>\n')
-    for namespace, body in reference.items():
+    for namespace in sorted(reference.iterkeys()):
+        body = reference[namespace]
         log.debug('Namespace=%s, Body=%s', namespace, body)
         out_file.write(
             '\t\t<h3>%s - %d indexes</h3>\n' %
             (namespace, body['index_count']))
         out_file.write('\t\t<table border="1">\n')
         out_file.write('\t\t\t<tr><th>Index Name</th><th>Index Key</th></tr>\n')
-        for index_name, index_key in body['indexes'].items():
+        for index_name in sorted(body['indexes'].iterkeys()):
+            index_key = body['indexes'][index_name]
             log.debug('Name=%s, Key=%s', index_name, index_key)
             out_file.write(
                 '\t\t\t<tr><td>{0}</td><td>{1}</td></tr>\n'.format(
-                index_name, index_key))
+                index_name,
+                index_key))
         out_file.write('\t\t</table>\n')
 
 
@@ -207,7 +211,8 @@ def write_server_status(out_file, servers, reference):
     out_file.write('\t\t<table border="1">\n')
     out_file.write(
         '\t\t\t<tr><th>Server</th><th>Status</th><th>Namespace</th><th>Source</th><th>Index Name</th><th>Source</th><th>Target</th></tr>\n')
-    for server_name, namespaces in servers.items():
+    for server_name in sorted(servers.keys()):
+        namespaces = servers[server_name]
         valid = True
         for collection in namespaces:
             namespace_name = collection.keys()[0]
@@ -255,7 +260,7 @@ def write_server_status(out_file, servers, reference):
 
         if valid:
             out_file.write(
-                '\t\t\t<tr><td>%s</td><td colspan="6">VALID</td></tr>\n' % 
+                '\t\t\t<tr><td>%s</td><td colspan="6">VALID</td></tr>\n' %
                 server_name)
     out_file.write('\t\t</table>\n')
 
@@ -265,6 +270,6 @@ if __name__ == '__main__':
     parser.add_argument('mongos_uri', help='URL of mongos')
     parser.add_argument('output_file', help='File contain output result')
     parser.add_argument('--simulate', action='store_true')
-    parser.add_argument('--output_json', action='store_false')
+    parser.add_argument('--output_json', action='store_true')
     args = parser.parse_args()
     main(args.mongos_uri, args.output_file, args.simulate, args.output_json)
