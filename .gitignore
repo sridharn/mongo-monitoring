@@ -1,3 +1,5 @@
 *.html
 *.raw
 *.pyc
+*.js
+*.json
